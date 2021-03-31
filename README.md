@@ -2,7 +2,6 @@
 Raymarching shader experiments, with a menger sponge fractal and a merging shader
 
 ## How to use
-```
 Download/clone reposotory
 Open the Fractal Shaders foler using unity (originaly made using 2018.4.19f1)
 
