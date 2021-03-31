@@ -1,0 +1,434 @@
+﻿#pragma kernel CSMain
+
+RWTexture2D<float4> Result;
+float4x4 _CameraToWorld;
+float4x4 _CameraInverseProjection;
+float4 _DirectionalLight;
+float _DirectionalLightAngle;
+
+float _RecursionDistance;
+
+Texture2D<float4>_SkyboxTexture;
+SamplerState sampler_SkyboxTexture;
+static const float PI = 3.14159265f;
+
+float _MinimumDistance;
+int _ItterationLimit;
+float _BreakeOffDistance;
+
+static bool DynamicDystance = false;
+
+//float CurrentBrakeoffDistance, CurrentMinimumDistance;
+float2 _PixelOffset;
+bool _DynamicShadows;
+
+
+
+
+struct Ray
+{
+    float3 origin;
+    float3 direction;
+};
+
+Ray CreateRay(float3 origin, float3 direction)
+{
+    Ray ray;
+    ray.origin = origin;
+    ray.direction = direction;
+    return ray;
+}
+
+struct MarchReturn
+{
+    float length;
+    float4 color;
+    float3 normal;
+};
+
+MarchReturn CreateMarchReturn(float length, float4 color, float3 normal)
+{
+    MarchReturn ret;
+    ret.length = length;
+    ret.color = color;
+    ret.normal = normal;
+    return ret;
+}
+
+//interface Figure
+//{
+//    float Length(float3 org);
+//    float3 Normal(float3 org);
+//    MarchReturn ReturnMarch(float3 org);
+//};
+
+float3 TrueMod(float3 org, float3 mod)
+{
+    return ((org % mod) + mod) % mod;
+}
+
+//float3 TrueAbs(float3 val)
+//{
+//    return float3(val.x * (val.x > 0 ? 1 : -1), val.y * (val.y > 0 ? 1 : -1), val.z * (val.z > 0 ? 1 : -1));
+
+//}
+
+struct Sphere /*: Figure*/
+{
+    float3 origin;
+    float diameter;
+    float4 color;
+    
+    float Length(float3 org)
+    {
+        return (distance(origin, org) - diameter / 2);
+    }
+    
+    float3 Normal(float3 org)
+    {
+        return normalize(org - origin);
+    }
+    
+    MarchReturn ReturnMarch(float3 org)
+    {
+        return CreateMarchReturn(Length(org), color, Normal(org));
+    }
+};
+
+Sphere CreateSphere(float3 origin, float diameter, float4 color)
+{
+    Sphere sphere;
+    sphere.origin = origin;
+    sphere.diameter = diameter;
+    sphere.color = color;
+    return sphere;
+}
+
+struct Box /*: Figure*/
+{
+    float3 origin;
+    float3 dimentions;
+    float4 color;
+    
+    float Length(float3 org)
+    {
+        float3 dist1 = abs(org - origin) - dimentions / 2;
+        return length(max(dist1, 0)) + min(max(dist1.x, max(dist1.y, dist1.z)), 0);
+    }
+    
+    float3 Normal(float3 org)
+    {
+        float3 loc = org - origin;
+        //float3 dir = loc / abs(loc);
+        float3 dist = abs(loc) - dimentions / 2;
+        //if (dist.x < 0 && dist.y < 0 && dist.z < 0)
+        //{
+            if (dist.x > dist.y && dist.x > dist.z)
+                return normalize(float3(1, 0, 0) * loc);
+            if (dist.y > dist.x && dist.y > dist.z)
+                return normalize(float3(0, 1, 0) * loc);
+        return normalize(float3(0, 0, 1) * loc);
+    }
+    
+    MarchReturn ReturnMarch(float3 org)
+    {
+        return CreateMarchReturn(Length(org), color, Normal(org));
+    }
+};
+
+Box CreateBox(float3 origin, float3 dimentions, float4 color)
+{
+    Box box;
+    box.origin = origin;
+    box.dimentions = dimentions;
+    box.color = color;
+    return box;
+}
+
+MarchReturn ReturnMengerSubtraction(float3 origin, float3 recursion, float3 dimentions, float4 color, float3 org)
+{
+    float lenght;
+    float3 normal = float3(-1, -1, -1);
+    
+    origin = TrueMod(origin, recursion);
+    
+    float3 offset = origin - recursion / 2;
+    org = TrueMod(org - offset, recursion) + offset;
+        
+    float3 dist = abs(org - origin) - dimentions / 2;
+    lenght = length(max(dist, 0)) + min(max(dist.x, max(dist.y, dist.z)), 0);
+    
+    float3 loc = org - origin;
+    //float3 dir = loc / abs(loc);
+    //float3 dist = abs(loc) - dimentions / 2;
+    if (dist.x > dist.y && dist.x > dist.z)
+    {
+        normal = normalize(float3(1, 0, 0) * loc);
+    }
+    if (dist.y > dist.x && dist.y > dist.z)
+    {
+        normal = normalize(float3(0, 1, 0) * loc);
+    }
+    if (dist.z > dist.x && dist.z > dist.y)
+    {
+        normal = normalize(float3(0, 0, 1) * loc);
+    }
+       
+    
+    return CreateMarchReturn(-lenght, color, -normal);
+}
+
+struct MengerSponge
+{
+    float3 origin;
+    float3 dimentions;
+    float4 color;
+    int iterationCount;
+    
+    MarchReturn ReturnMarch(float3 org)
+    {
+        const float3 dir[3] = { float3(3, 1, 1), float3(1, 3, 1), float3(1, 1, 3) };
+        const float4 colorset[5] = { float4(0, 1, 1, 1), float4(0, 1, 0, 1), float4(0, 0, 1, 1), float4(1, 0, 1, 1), float4(1, 1, 0, 1) };
+        
+        Box mainBox = CreateBox(origin, dimentions, color);
+        MarchReturn ret = mainBox.ReturnMarch(org);
+        for (int i = 0; i < iterationCount; i++)
+        {
+            for (int j = 0; j < 3; j++)
+            {
+                MarchReturn newRet = ReturnMengerSubtraction(origin, dimentions * pow(dir[j], i + 1) / pow(3, i), dimentions * pow(dir[j], i + 2) / pow(3, i + 1), colorset[(i + 2)%5],
+                org);
+                if (newRet.length > ret.length)
+                    ret = newRet;
+            }
+        }
+        return ret;
+    }
+    
+    //MarchReturn ReturnMarch(float3 org)
+    //{
+    //    const float3 dir[3] = { float3(3, 1, 1), float3(1, 3, 1), float3(1, 1, 3) };
+    //    MarchReturn ret = CreateMarchReturn(1.#INF, 0, 0);
+        
+    //    for (int i = 0; i < iterationCount; i++)
+    //    {
+    //        for (int j = 0; j < 3; j++)
+    //        {
+    //            MarchReturn newRet = ReturnMengerSubtraction(origin, dimentions * pow(dir[j], i + 1) / pow(3, i), dimentions * pow(dir[j], i + 2) / pow(3, i + 1), color, org);
+    //            if (newRet.length < ret.length)
+    //                ret = newRet;
+    //        }
+    //    }
+        
+    //    MarchReturn newRet = CreateBox(origin, dimentions, color).ReturnMarch(org);
+    //    if(newRet.length > ret.length)
+    //        ret = newRet;
+        
+    //    return ret;
+    //}
+};
+
+MengerSponge CreateMengerSponge(float3 origin, float3 dimentions, float4 color, int iterationCount)
+{
+    MengerSponge sponge;
+    sponge.origin = origin;
+    sponge.dimentions = dimentions;
+    sponge.color = color;
+    sponge.iterationCount = iterationCount;
+    return sponge;
+}
+
+//StructuredBuffer<Sphere> _Spheres;
+//StructuredBuffer<Box> _Boxes;
+StructuredBuffer<MengerSponge> _Sponges;
+
+
+
+Ray CreateCameraRay(float2 uv)
+{
+    // Transform the camera origin to world space
+    float3 origin = mul(_CameraToWorld, float4(0.0f, 0.0f, 0.0f, 1.0f)).xyz;
+    
+    // Invert the perspective projection of the view-space position
+    float3 direction = mul(_CameraInverseProjection, float4(uv, 0.0f, 1.0f)).xyz;
+    // Transform the direction from camera to world space and normalize
+    direction = mul(_CameraToWorld, float4(direction, 0.0f)).xyz;
+    direction = normalize(direction);
+
+    return CreateRay(origin, direction);
+}
+
+MarchReturn MaxTravelDistnace(float3 org)
+{
+    MarchReturn ret = CreateMarchReturn(1.#INF, 0, 0);
+    //uint numSpheres, stride;
+    //_Spheres.GetDimensions(numSpheres, stride);
+    //for (uint i = 0; i < numSpheres;i++)
+    //{
+    //    MarchReturn newRet = _Spheres[i].ReturnMarch(org);
+    //    if(newRet.length < ret.length)
+    //        ret = newRet;
+    //}
+    uint numSponges, stride;
+    _Sponges.GetDimensions(numSponges, stride);
+    for (uint i = 0; i < numSponges; i++)
+    {
+        MarchReturn newRet = _Sponges[i].ReturnMarch(org);
+        if (newRet.length < ret.length)
+            ret = newRet;
+    }
+    //uint numBoxes;
+    //_Sponges.GetDimensions(numBoxes, stride);
+    //for (uint i = 0; i < numBoxes; i++)
+    //{
+    //    MarchReturn newRet = _Sponges[i].ReturnMarch(org);
+    //    if (newRet.length < ret.length)
+    //        ret = newRet;
+    //}
+    return ret;
+    
+}
+
+MarchReturn MaxTravelDistnaceMaxFunction(float3 org)
+{
+    MarchReturn ret = CreateMarchReturn(-1.#INF, 0, 0);
+    //uint numSpheres, stride;
+    //_Spheres.GetDimensions(numSpheres, stride);
+    //for (uint i = 0; i < numSpheres; i++)
+    //{
+    //    MarchReturn newRet = _Spheres[i].ReturnMarch(org);
+    //    if (newRet.length > ret.length)
+    //        ret = newRet;
+    //}
+    uint numBoxes, stride;
+    _Sponges.GetDimensions(numBoxes, stride);
+    for (uint i = 0; i < numBoxes; i++)
+    {
+        MarchReturn newRet = _Sponges[i].ReturnMarch(org);
+        if (newRet.length > ret.length)
+            ret = newRet;
+    }
+    return ret;
+}
+
+float4 ReturnSkyBox(Ray ray)
+{
+    float theta = acos(ray.direction.y) / -PI;
+    float phi = atan2(ray.direction.x, -ray.direction.z) / -PI * 0.5f;
+    return _SkyboxTexture.SampleLevel(sampler_SkyboxTexture, float2(phi, theta), 0);
+}
+
+struct TraceReturn
+{
+    float3 position;
+    float length;
+    float4 color;
+    float3 normal;
+    int IterationCount;
+    float AproximateAngle;
+};
+
+TraceReturn CreateTraceReturn(float3 position, float4 color, float length, float3 normal, int IterationCount, float AproximateAngle)
+{
+    TraceReturn ret;
+    ret.position = position;
+    ret.length = length;
+    ret.color = color;
+    ret.normal = normal;
+    ret.IterationCount = IterationCount;
+    ret.AproximateAngle = AproximateAngle;
+    return ret;
+}
+
+TraceReturn TraceRay(Ray ray, float minDist, float maxDist)
+{
+    float AproximateAngle = 1.#INF;
+    float TotalLength = 0;
+    float PrevDist = 1.#INF;
+    for (uint i = 0; i < _ItterationLimit; i++)
+    {
+        MarchReturn ret = MaxTravelDistnace(ray.origin);
+        
+        if (ret.length < minDist)
+        {
+            return CreateTraceReturn(ray.origin, ret.color, TotalLength, ret.normal, i, AproximateAngle);
+        }
+        
+        if (ret.length > maxDist)
+        {
+            return CreateTraceReturn(ray.origin, 0, 1.#INF, 0, i, AproximateAngle);
+        }
+        
+        
+        if (i > 0)
+        {
+            float y = ret.length * ret.length / (2 * PrevDist);
+            float d = sqrt(ret.length * ret.length - y * y);
+            AproximateAngle = min(AproximateAngle, d / max(0.0f, (TotalLength - y)));
+        }
+        TotalLength += ret.length;
+        PrevDist = ret.length;
+        
+        ray = CreateRay(ray.origin + normalize(ray.direction) * ret.length, ray.direction);
+    }
+    return CreateTraceReturn(ray.origin, 0, 1.#INF, 0, _ItterationLimit, AproximateAngle);
+}
+
+RWStructuredBuffer<float> _DistanceBuffer;
+
+float4 Shade(Ray ray)
+{
+    MarchReturn tem = MaxTravelDistnace(ray.origin);
+    _DistanceBuffer[0] = tem.length;
+    
+    
+    TraceReturn ret = TraceRay(ray, _MinimumDistance, _BreakeOffDistance);
+    if (ret.length == 1.#INF)
+        return ReturnSkyBox(ray);
+    else
+    {
+        float ShadowFactor = 0.4f;
+        if(_DynamicShadows)
+        {
+            float3 loc = ray.origin + ray.direction * ret.length;
+            Ray lightRay = CreateRay(loc + ret.normal * _MinimumDistance * 10, -normalize(_DirectionalLight.xyz));
+        
+            TraceReturn lightRet = TraceRay(lightRay, _MinimumDistance, _BreakeOffDistance);
+        
+            if (lightRet.length == 1.#INF)
+            {
+                float InShadow = lightRet.AproximateAngle;
+                ShadowFactor = clamp(InShadow * _DirectionalLightAngle, 0.4f, 1);
+            }
+        }
+        else
+        {
+            ShadowFactor = 1;
+        }
+        
+        //ShadowFactor = 1;
+        
+        return ret.color * ((dot(-ret.normal, _DirectionalLight.xyz) + length(_DirectionalLight.xyz)) / 2) *ShadowFactor;
+        //return float4(ret.normal, 1);
+    }
+}
+
+
+[numthreads(8, 8, 1)]
+void CSMain(uint3 id : SV_DispatchThreadID)
+{
+    // Get the dimensions of the RenderTexture
+    uint width, height;
+    Result.GetDimensions(width, height);
+    
+    //Sphere s = CreateSphere(float3(0, 0, 0), 1.0f, float4(0.8, 0.8, 0.8, 0));
+
+    // Transform pixel to [-1,1] range
+    float2 uv = float2((id.xy + _PixelOffset) / float2(width, height) * 2.0f - 1.0f);
+
+    // Get a ray for the UVs
+    Ray ray = CreateCameraRay(uv);
+
+    // Write some colors
+    Result[id.xy] = Shade(ray);
+}
